@@ -8,7 +8,7 @@ import threading
 
 from logilinux import MXKeypadButton
 
-from . import render
+from . import commands, render
 from .icons import clear_caches as clear_icon_caches
 from .config import Config
 from .device import GRID_BUTTONS, KeypadHandle, KeypadUnavailable
@@ -168,6 +168,13 @@ class Daemon:
             return
         if binding is None or not binding.shortcut:
             log.info("press %s has no binding in profile %r", btn.name, profile.name)
+            return
+        if commands.is_command(binding.shortcut):
+            log.info("firing %s -> %s", btn.name, binding.shortcut)
+            try:
+                commands.run(binding.shortcut, self._last_focus)
+            except Exception:
+                log.exception("run failed for %s", binding.shortcut)
             return
         if self._injector is None:
             log.warning("no injector available — cannot fire %s", binding.shortcut)

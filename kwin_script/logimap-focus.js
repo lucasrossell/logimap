@@ -34,11 +34,36 @@ function emit(window) {
 
 print("logimap-focus: script loaded");
 
+// Also re-emit when the active window's caption changes (e.g. Dolphin
+// navigating to another folder), so `run:` keys see the current folder
+// without waiting for the next window activation.
+var tracked = null;
+
+function onCaptionChanged() {
+    if (tracked && workspace.activeWindow === tracked) {
+        emit(tracked);
+    }
+}
+
+function track(window) {
+    if (tracked) {
+        try { tracked.captionChanged.disconnect(onCaptionChanged); } catch (e) {}
+    }
+    tracked = window || null;
+    if (tracked) {
+        try { tracked.captionChanged.connect(onCaptionChanged); } catch (e) {
+            print("logimap-focus: captionChanged unavailable: " + e);
+        }
+    }
+}
+
 workspace.windowActivated.connect(function(window) {
+    track(window);
     emit(window);
 });
 
 // Emit once on load so the daemon paints the right profile on startup.
 if (workspace.activeWindow) {
+    track(workspace.activeWindow);
     emit(workspace.activeWindow);
 }

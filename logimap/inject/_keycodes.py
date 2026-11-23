@@ -35,6 +35,12 @@ KEY_CODE: dict[str, int] = {
     "leftbrace": 26, "[": 26, "rightbrace": 27, "]": 27, "backslash": 43, "\\": 43,
     "f1": 59, "f2": 60, "f3": 61, "f4": 62, "f5": 63, "f6": 64,
     "f7": 65, "f8": 66, "f9": 67, "f10": 68, "f11": 87, "f12": 88,
+    # Media / system keys (handled globally by Plasma).
+    "playpause": 164, "play": 164, "nextsong": 163, "next": 163,
+    "previoussong": 165, "prev": 165, "stopcd": 166,
+    "mute": 113, "volumedown": 114, "volumeup": 115, "micmute": 248,
+    "print": 99, "sysrq": 99,
+    "brightnessdown": 224, "brightnessup": 225, "calc": 140,
 }
 
 
