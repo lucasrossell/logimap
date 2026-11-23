@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import glob
 import logging
+import os
 import time
 from threading import Event as ThreadEvent, RLock
 from typing import Callable
@@ -20,6 +22,39 @@ from . import render
 log = logging.getLogger(__name__)
 
 RECONNECT_DELAY_SECONDS = 2.0
+
+# A freshly enumerated keypad (plugged in, woken, or reset by a USB hub)
+# acknowledges image writes before its LCD is ready and silently drops some
+# of them: one test lost the first key written 1.5 s after enumeration, and a
+# hub reset lost seven of nine written ~2 s after. Keys written 12 s after
+# enumeration all showed. So: don't talk to a keypad younger than
+# SETTLE_SECONDS, and repaint once it is STABLE_AGE_SECONDS old.
+SETTLE_SECONDS = 3.0
+STABLE_AGE_SECONDS = 10.0
+# Max times paint_grid restarts from the first key after a mid-grid reconnect.
+MAX_GRID_RESTARTS = 2
+
+_KEYPAD_HID_ID = "HID_ID=0003:0000046D:0000C354"
+_SYSFS_HIDRAW = "/sys/class/hidraw"
+_DEV = "/dev"
+
+
+def keypad_age_seconds() -> float | None:
+    """Seconds since the keypad's hidraw node appeared, or None if unknown.
+
+    The kernel creates /dev/hidrawN when the device enumerates, so its ctime
+    is the enumeration time.
+    """
+    for sys_dir in glob.glob(os.path.join(_SYSFS_HIDRAW, "hidraw*")):
+        try:
+            with open(os.path.join(sys_dir, "device", "uevent")) as f:
+                if _KEYPAD_HID_ID not in f.read():
+                    continue
+            ctime = os.stat(os.path.join(_DEV, os.path.basename(sys_dir))).st_ctime
+        except OSError:
+            continue
+        return max(0.0, time.time() - ctime)
+    return None
 
 GRID_BUTTONS: tuple[MXKeypadButton, ...] = (
     MXKeypadButton.GRID_0,
@@ -50,12 +85,21 @@ class KeypadHandle:
         self._lock = RLock()
         self._stop = ThreadEvent()
         self._press_cb: Callable[[MXKeypadButton], None] | None = None
+        self._generation = 0  # bumped on every successful open
+        self._stable_at = 0.0  # time.monotonic() when the keypad is settled
 
     def open(self) -> None:
         with self._lock:
             self._open_locked()
 
     def _open_locked(self) -> None:
+        age = keypad_age_seconds()
+        if age is not None and age < SETTLE_SECONDS:
+            wait = SETTLE_SECONDS - age
+            log.info("keypad enumerated %.1fs ago — waiting %.1fs for it to settle", age, wait)
+            if self._stop.wait(wait):
+                raise KeypadUnavailable("shutting down")
+            age = SETTLE_SECONDS
         dev = self._lib.find_device(DeviceType.MX_KEYPAD)
         if dev is None:
             raise KeypadUnavailable("MX Keypad not found — is it plugged in?")
@@ -68,7 +112,22 @@ class KeypadHandle:
         dev.set_event_callback(self._on_native_event)
         dev.start_monitoring()
         self._device = dev
+        self._generation += 1
+        # Unknown age (no sysfs match): assume settled rather than repaint.
+        remaining = 0.0 if age is None else max(0.0, STABLE_AGE_SECONDS - age)
+        self._stable_at = time.monotonic() + remaining
         log.info("keypad opened: %s", dev.info)
+
+    def seconds_until_stable(self) -> float:
+        """How long until the open keypad is old enough to trust a paint.
+
+        A paint made before then may have been silently dropped and should
+        be repeated after this many seconds. 0 when settled or not open.
+        """
+        with self._lock:
+            if self._device is None:
+                return 0.0
+            return max(0.0, self._stable_at - time.monotonic())
 
     def close(self) -> None:
         self._stop.set()
@@ -92,6 +151,10 @@ class KeypadHandle:
     def paint_grid(self, images: dict[MXKeypadButton, bytes]) -> bool:
         """Paint every grid button. Missing keys are cleared to blank.
 
+        If the keypad reconnects partway through, the keys painted before the
+        reconnect were lost with the old device, so start over from the first
+        key.
+
         The whole 9-key sequence runs under self._lock so concurrent callers
         (focus-change thread, config-watch thread) cannot interleave native
         set_key_image calls — the underlying C++ PacketBufferPool is a 16-slot
@@ -100,10 +163,18 @@ class KeypadHandle:
         """
         blank = render.make_blank()
         with self._lock:
-            for btn in GRID_BUTTONS:
-                if not self.paint(btn, images.get(btn, blank)):
-                    return False
-        return True
+            for attempt in range(MAX_GRID_RESTARTS + 1):
+                generation = self._generation
+                for btn in GRID_BUTTONS:
+                    if not self.paint(btn, images.get(btn, blank)):
+                        return False
+                    if self._generation != generation:
+                        break  # reconnected mid-grid
+                else:
+                    return True
+                log.info("keypad reconnected mid-repaint — repainting all keys")
+            log.warning("keypad kept reconnecting during repaint — giving up for now")
+            return False
 
     def _with_retry(self, op: Callable[[MXKeypadDevice], bool]) -> bool:
         with self._lock:
