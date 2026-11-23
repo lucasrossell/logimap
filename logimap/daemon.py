@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+import time
 
 from logilinux import MXKeypadButton
 
@@ -40,6 +41,9 @@ class Daemon:
         self._painted: tuple[int, int] | None = None
         self._pending_profile: Profile | None = None
         self._last_focus: WindowFocus | None = None
+        # time.monotonic() at which to repaint a grid that was painted while
+        # the keypad was still settling (see KeypadHandle.seconds_until_stable).
+        self._repaint_at: float | None = None
 
     def run(self) -> int:
         signal.signal(signal.SIGTERM, lambda *_: self._stop.set())
@@ -116,6 +120,11 @@ class Daemon:
         if self._paint_profile(profile):
             self._painted = (id(profile), self._page)
             self._pending_profile = None
+            wait = self._handle.seconds_until_stable()
+            if wait > 0:
+                # The keypad may have dropped some of these images silently.
+                self._repaint_at = time.monotonic() + wait
+                log.info("keypad just connected — repainting in %.1fs to be sure", wait)
             return
         self._painted = None
         self._pending_profile = profile
@@ -131,11 +140,20 @@ class Daemon:
 
     def _retry_paint(self) -> None:
         while not self._stop.is_set():
-            self._paint_requested.wait(PAINT_RETRY_SECONDS)
+            timeout = PAINT_RETRY_SECONDS
+            if self._repaint_at is not None:
+                timeout = min(timeout, max(0.0, self._repaint_at - time.monotonic()))
+            self._paint_requested.wait(timeout)
             self._paint_requested.clear()
             if self._stop.is_set():
                 return
             with self._lock:
+                if self._repaint_at is not None and time.monotonic() >= self._repaint_at:
+                    self._repaint_at = None
+                    if self._pending_profile is None and self._current is not None:
+                        log.info("keypad settled — repainting profile %s", self._current.name)
+                        self._painted = None
+                        self._pending_profile = self._current
                 if (
                     self._pending_profile is None
                     and self._current is not None

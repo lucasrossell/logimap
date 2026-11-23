@@ -116,6 +116,7 @@ def runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(daemon, "Config", SimpleNamespace(load=loader))
     handle = Mock()
     handle.paint_grid.return_value = True
+    handle.seconds_until_stable.return_value = 0.0
     monkeypatch.setattr(daemon, "KeypadHandle", Mock(return_value=handle))
     monkeypatch.setattr(daemon, "get_injector", Mock(return_value=Mock()))
     monkeypatch.setattr(daemon, "KWinFocusSource", Mock())
@@ -235,6 +236,36 @@ def test_reconnect_repaints_selected_page(runtime):
     runtime.handle.is_monitoring.return_value = False
     flush_paint(app)
     assert runtime.handle.paint_grid.call_args.args[0][buttons.GRID_0] == "Second"
+
+
+def test_paint_on_settling_keypad_is_repeated_once_it_settles(runtime, monkeypatch):
+    # A just-connected keypad acks images it then drops, so the daemon paints
+    # the grid again once the keypad is old enough.
+    app, handle = runtime.app, runtime.handle
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(sys.modules["logimap.daemon"].time, "monotonic", lambda: clock.now)
+    handle.seconds_until_stable.return_value = 7.0
+    app._painted = None
+    app._pending_profile = app._current
+    flush_paint(app)
+    assert app._repaint_at == 107.0
+    handle.reset_mock()
+    handle.seconds_until_stable.return_value = 0.0
+    flush_paint(app)  # too early: nothing to do
+    handle.paint_grid.assert_not_called()
+    clock.now = 107.0
+    flush_paint(app)
+    handle.paint_grid.assert_called_once()
+    assert app._repaint_at is None
+    flush_paint(app)  # settled now, so no further repaints
+    handle.paint_grid.assert_called_once()
+
+
+def test_paint_on_settled_keypad_is_not_repeated(runtime):
+    runtime.app._painted = None
+    runtime.app._pending_profile = runtime.app._current
+    flush_paint(runtime.app)
+    assert runtime.app._repaint_at is None
 
 
 def test_pending_page_is_replaced_when_profile_changes(runtime):
