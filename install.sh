@@ -100,7 +100,7 @@ fi
 # Refresh the logimap editable install BEFORE the failure-prone heavy
 # steps (sudo dnf, cmake, pybind11 SDK build) so `logimap --version` always
 # tracks pyproject.toml — even if a later step aborts under `set -e`.
-# `--no-deps` because system packages (Pillow, dbus-next) aren't installed
+# `--no-deps` because system packages (Pillow, jeepney) aren't installed
 # yet at this point; `--version` only reads importlib.metadata and needs no
 # runtime deps. pip is idempotent: a no-op when the version already matches.
 pick_python() {

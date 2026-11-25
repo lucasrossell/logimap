@@ -24,7 +24,7 @@ classifiers = [
 ]
 dependencies = [
     "Pillow>=10.0",
-    "dbus-next>=0.2.3",
+    "jeepney>=0.8",
 ]
 
 [project.optional-dependencies]
